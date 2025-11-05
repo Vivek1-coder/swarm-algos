@@ -18,8 +18,12 @@ class Visualizer:
         # set white background
         self.ax.set_facecolor('white')
         
-        # pheromone heatmap
-        pher = self.pheromap.copy()
+        # pheromone heatmap (combined visualization)
+        try:
+            pher = self.pheromap.copy()
+        except:
+            # Fallback if copy method doesn't work as expected
+            pher = self.pheromap.exploration_grid.copy() + self.pheromap.victim_path_grid.copy() * 2.0
         im = self.ax.imshow(pher, cmap='hot', origin='lower')
 
         # obstacles overlay

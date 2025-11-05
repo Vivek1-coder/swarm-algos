@@ -17,16 +17,25 @@ def run_simulation(steps=200, robots_count=4, width=60, height=36):
     topics = {
         "beacon": Topic(),
         "map_merge": Topic(),
-        "status": Topic()
+        "status": Topic(),
+        "robot_positions": Topic(),
+        "area_explored": Topic()
     }
 
     # confirmed victims set (shared with visualizer)
     confirmed_victims = set()
+    
+    # Track time to first victim discovery
+    first_victim_time = None
+    start_time = time.time()
 
-    # central map merge handler
+    # central map merge handler - now handles all pheromone layers
     def handle_map(msg):
-        # msg: {'robot': id, 'map': np.array}
-        pheromap.merge(msg['map'])
+        # msg: {'robot': id, 'exploration': np.array, 'victim_path': np.array, 'repulsive': np.array}
+        if 'exploration' in msg:
+            pheromap.merge(msg['exploration'], 
+                          msg.get('victim_path'), 
+                          msg.get('repulsive'))
 
     topics['map_merge'].subscribe(handle_map)
 
@@ -34,17 +43,51 @@ def run_simulation(steps=200, robots_count=4, width=60, height=36):
     beacon_events = []
     import time as _time
     def beacon_handler(msg):
+        nonlocal first_victim_time
         # msg: {"robot": id, "pos": (x,y), "conf": float}
         t = _time.time()
         beacon_events.append({"time": t, "robot": msg.get('robot'), "pos": msg.get('pos'), "conf": msg.get('conf')})
-        print(f"[BEACON] t={t:.2f} robot={msg.get('robot')} pos={msg.get('pos')} conf={msg.get('conf')}")
+        print(f"[BEACON] t={t:.2f} robot={msg.get('robot')} pos={msg.get('pos')} conf={msg.get('conf'):.2f}")
+        
+        # Track first victim discovery
+        if first_victim_time is None:
+            first_victim_time = t - start_time
 
     topics['beacon'].subscribe(beacon_handler)
+    
+    # Area explored handler: share negative information
+    fully_explored_cells = set()
+    def area_explored_handler(msg):
+        cell = msg.get('cell')
+        if cell:
+            fully_explored_cells.add(cell)
+    
+    topics['area_explored'].subscribe(area_explored_handler)
+
+    # Assign sectors to robots for coordinated dispersion
+    # Divide grid into octants (8 sectors)
+    sectors = []
+    mid_x, mid_y = width // 2, height // 2
+    quarter_x, quarter_y = width // 4, height // 4
+    
+    # Define 8 sectors (octants)
+    sectors = [
+        (0, mid_x, 0, mid_y),              # SW
+        (mid_x, width, 0, mid_y),          # SE
+        (0, mid_x, mid_y, height),         # NW
+        (mid_x, width, mid_y, height),     # NE
+        (quarter_x, mid_x + quarter_x, 0, mid_y),  # S-center
+        (quarter_x, mid_x + quarter_x, mid_y, height),  # N-center
+        (0, mid_x, quarter_y, mid_y + quarter_y),  # W-center
+        (mid_x, width, quarter_y, mid_y + quarter_y)  # E-center
+    ]
 
     robots = []
     for i in range(robots_count):
-        # all robots start from base (0,0)
-        r = Robot(i, env, pheromap, topics, start_pos=(0, 0), comm_range=8, alpha=0.5, beta=3.0)
+        # Assign sector (cycle through available sectors)
+        sector = sectors[i % len(sectors)] if len(sectors) > 0 else None
+        r = Robot(i, env, pheromap, topics, start_pos=(0, 0), comm_range=8, 
+                 alpha=0.5, beta=3.0, energy=500, sector=sector, total_steps=steps)
         robots.append(r)
 
     # subscribe to status to detect failures
@@ -54,6 +97,19 @@ def run_simulation(steps=200, robots_count=4, width=60, height=36):
             failed_robots.add(msg['robot'])
 
     topics['status'].subscribe(status_handler)
+    
+    # Robot position broadcasting for spreading pressure
+    def broadcast_positions():
+        positions = [(r.x, r.y) for r in robots if not r.failed]
+        for r in robots:
+            if not r.failed:
+                r.nearby_robots = [pos for pos in positions if pos != (r.x, r.y)]
+    
+    # Share fully explored areas with all robots
+    def share_explored_areas():
+        for r in robots:
+            if not r.failed:
+                r.fully_explored_areas = fully_explored_cells.copy()
 
     for r in robots:
         r.start()
@@ -77,12 +133,25 @@ def run_simulation(steps=200, robots_count=4, width=60, height=36):
     total_free_cells = int((~env.obstacles).sum())
     initial_victim_count = int(env.victims.sum())
     coverage_history = []
-    step_delay = 0.05
+    step_delay = 0.001  # reduced for faster execution
     et_step = None
 
+    # Enhanced metrics tracking
+    time_to_first_victim = None
+    redundant_visit_history = []
+    energy_history = []
+    
     for step in range(steps):
-        # global pheromone evaporation
-        pheromap.evaporate(rho=0.02)
+        # Adaptive global pheromone evaporation
+        pheromap.evaporate(rho=0.02, adaptive=True)
+        
+        # Broadcast robot positions for spreading pressure (every 5 steps)
+        if step % 5 == 0:
+            broadcast_positions()
+        
+        # Share fully explored areas (every 20 steps)
+        if step % 20 == 0:
+            share_explored_areas()
 
         # compute coverage and other metrics snapshot
         # aggregate visited counts per cell
@@ -94,6 +163,16 @@ def run_simulation(steps=200, robots_count=4, width=60, height=36):
         explored_cells = len(visit_counts)
         coverage = explored_cells / max(1, total_free_cells)
         coverage_history.append(coverage)
+        
+        # Track redundant visits (cells visited >3 times)
+        redundant_visits = sum(1 for count in visit_counts.values() if count > 3)
+        redundant_visit_history.append(redundant_visits)
+        
+        # Track average remaining energy
+        active_robots = [r for r in robots if not r.failed]
+        if active_robots:
+            avg_energy = sum(r.energy for r in active_robots) / len(active_robots)
+            energy_history.append(avg_energy)
 
         # determine ET: time to reach final coverage plateau or detect all victims
         # we'll set ET later once we know final coverage, but also watch for all victims detected
@@ -107,8 +186,8 @@ def run_simulation(steps=200, robots_count=4, width=60, height=36):
         if len(detected_by_swarm) >= initial_victim_count and et_step is None:
             et_step = step
 
-        # visualize occasionally
-        if step % 5 == 0:
+        # visualize occasionally (reduced frequency for performance)
+        if step % 50 == 0:
             viz.draw()
         time.sleep(step_delay)
 
@@ -175,6 +254,14 @@ def run_simulation(steps=200, robots_count=4, width=60, height=36):
     import statistics
     EU = statistics.pstdev(zone_fracs) if zone_fracs else 0.0
 
+    # Enhanced metrics
+    avg_final_energy = sum(r.energy for r in robots if not r.failed) / max(1, len([r for r in robots if not r.failed]))
+    energy_efficiency = (avg_final_energy / 500.0) * 100.0  # percentage of energy remaining
+    
+    # Redundant visits with threshold >3
+    highly_redundant = sum(1 for v in final_visit_counts.values() if v > 3)
+    highly_redundant_rate = 100.0 * highly_redundant / max(1, explored_cells)
+    
     metrics = {
         'CoverageEfficiency_percent': CE,
         'ExplorationTime_seconds': ET,
@@ -184,6 +271,11 @@ def run_simulation(steps=200, robots_count=4, width=60, height=36):
         'total_free_cells': total_free_cells,
         'overlapped_cells': overlapped,
         'final_coverage_fraction': final_coverage,
+        'TimeToFirstVictim_seconds': first_victim_time if first_victim_time else ET,
+        'EnergyEfficiency_percent': energy_efficiency,
+        'HighlyRedundantVisits_percent': highly_redundant_rate,
+        'victims_detected': len(confirmed_victims),
+        'total_victims': initial_victim_count,
     }
 
     # write metrics to files in project root

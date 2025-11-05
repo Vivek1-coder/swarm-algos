@@ -33,3 +33,6 @@ Files of interest
 See the code for parameters you can tune: pheromone evaporation (rho), alpha/beta, Q deposit, communication range.
 
 License: MIT
+
+
+python -m src.simulation.main --steps 3000 --robots 12 --width 60 --height 36
