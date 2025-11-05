@@ -201,4 +201,9 @@ def run_simulation(steps=200, robots_count=4, width=60, height=36):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--steps', type=int, 
+    parser.add_argument('--steps', type=int, default=200)
+    parser.add_argument('--robots', type=int, default=4)
+    parser.add_argument('--width', type=int, default=60)
+    parser.add_argument('--height', type=int, default=36)
+    args = parser.parse_args()
+    run_simulation(steps=args.steps, robots_count=args.robots, width=args.width, height=args.height)
