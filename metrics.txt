@@ -1,0 +1,8 @@
+CoverageEfficiency_percent: 55.64435564435564
+ExplorationTime_seconds: 4.3
+RedundancyRate_percent: 69.92818671454219
+ExplorationUniformity_std: 0.16122590469985612
+explored_cells: 1114
+total_free_cells: 2002
+overlapped_cells: 779
+final_coverage_fraction: 0.5564435564435565
